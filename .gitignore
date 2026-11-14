@@ -1,0 +1,8 @@
+# run data and local state stay on this PC
+check/
+runs/
+logs/
+master.db
+
+__pycache__/
+*.pyc
