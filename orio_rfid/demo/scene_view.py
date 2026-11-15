@@ -15,9 +15,14 @@ data (all positions in the ROOM frame, metres):
     items      [{uid, name, x, y, z, shelf, r90, state, note}]   state: 'new' placed in this scan, 'old' last known place,
                                                                 'missing' not seen in a finished scan; note = second half of the label
     robot      (x, y, yaw, antenna z, live) or None      path  [(x, y), ...]      waypoints  [(x, y, name, state)]
-    selected, hover   uid or None        cloud, regions, truth   switches        hud   text lines for the corner
+                                                                 dim = True: drawn faint (it does not pass the window's filter)
+    selected   uid, a list of uids (every tag of one item name) or None     hover   uid or None
+    cloud, regions, truth   switches        hud   text lines for the corner
 
-Standard library + numpy + Pillow. Try it without the window:   python3 scene_view.py out.png [2d|3d]
+view.set_style('light', 1.5) switches the colours (dark / light, as the window's themes) and the size of the text and
+the marks (the window's scale: 1.0 at 1280 x 800).
+
+Standard library + numpy + Pillow. Try it without the window:   python3 scene_view.py out.png [2d|3d] [dark|light] [scale]
 """
 import colorsys
 import csv
@@ -28,13 +33,26 @@ import os
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-STAGE, GRID, ROBOT, PATH = (6, 8, 12), (26, 34, 47), (127, 211, 255), (137, 220, 235)
-GREEN, YELLOW, RED, GREY, TEXT, SUB = (166, 227, 161), (249, 226, 175), (243, 139, 168), (108, 112, 134), (205, 214, 244), (166, 173, 200)
+THEMES = {      # LABEL: behind a text label; BASE_FILL: the robot's base; MAST; RING: round a selected item; LIGHT: tag shades
+    'dark': dict(STAGE=(6, 8, 12), GRID=(26, 34, 47), ROBOT=(127, 211, 255), PATH=(137, 220, 235), GREEN=(166, 227, 161), YELLOW=(249, 226, 175),
+                 RED=(243, 139, 168), GREY=(108, 112, 134), TEXT=(205, 214, 244), SUB=(166, 173, 200), LABEL=(10, 13, 18, 205),
+                 BASE_FILL=(43, 62, 82, 235), MAST=(110, 126, 150, 255), RING=(255, 255, 255, 230)),
+    'light': dict(STAGE=(250, 251, 253), GRID=(222, 227, 236), ROBOT=(16, 104, 176), PATH=(10, 116, 166), GREEN=(35, 122, 54), YELLOW=(154, 98, 0),
+                  RED=(200, 16, 46), GREY=(125, 132, 152), TEXT=(31, 35, 51), SUB=(83, 90, 112), LABEL=(255, 255, 255, 228),
+                  BASE_FILL=(205, 220, 236, 240), MAST=(120, 132, 155, 255), RING=(20, 24, 36, 235)),
+}
+globals().update(THEMES['dark'])        # STAGE, GRID, ... are the colours of the theme in use (SceneView.set_style)
 NEAR, FOV = 0.15, 50.0
 EDGES = ((0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7))
 
 
 def _font(size):
+    """the window's text font if this runs inside the window (ui.FAMILY), else DejaVu"""
+    try:
+        import ui
+        return ui.pil_font(size, ui.FAMILY)
+    except ImportError:
+        pass
     for name in ('DejaVuSans.ttf', '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'):
         try:
             return ImageFont.truetype(name, size)
@@ -56,12 +74,16 @@ class Scene:
             hue = ((275 - ids.index(int(s['id'])) * 360 / len(ids)) % 360) / 360
             a, u, n = np.array(s['a'], float), np.array(s['u'], float), np.array(s['nrm'], float); z0, z1 = s['z0'], s['z0'] + s['H']
             c = np.array([np.r_[a + al * u - dp * n, z] for z in (z0, z1) for al, dp in ((0, 0), (s['W'], 0), (s['W'], s['depth']), (0, s['depth']))])
-            self.shelves[int(s['id'])] = dict(color=tuple(int(255 * v) for v in colorsys.hls_to_rgb(hue, 0.58, 0.78)), corners=c, hue=hue)
+            self.shelves[int(s['id'])] = dict(corners=c, hue=hue, color={th: tuple(int(255 * v) for v in colorsys.hls_to_rgb(hue, li, 0.78))
+                                                                             for th, li in (('dark', 0.58), ('light', 0.44))})
         path = os.path.join(site_dir, sc.get('cloud_file', ''))
         C = np.load(path) if os.path.isfile(path) else np.zeros((0, 4), np.float32)
         self.cloud = C[:, :3].astype(float); g = 0.14 + 0.6 * C[:, 3:4]
-        self.cloud_rgb = (np.clip(g * np.array([0.92, 0.96, 1.08]), 0, 1) * 255).astype(np.uint8)
-        self.truth, self.tag_color = {}, {}  # rfid_uid -> tape-measured room position (items only); rfid_uid -> colour
+        # bright points on the dark stage (as the replay page, a little dimmed); on the light stage the same points from pale to dark
+        self.cloud_rgb = {'dark': (np.clip(g * np.array([0.92, 0.96, 1.08]), 0, 1) * 255 * 0.72).astype(np.uint8),
+                          'light': (np.clip((0.93 - 0.43 * C[:, 3:4]) * np.array([0.95, 0.97, 1.0]), 0, 1) * 255).astype(np.uint8)}
+        self.truth = {}                      # rfid_uid -> tape-measured room position (items only)
+        self.tag_color = {'dark': {}, 'light': {}}       # theme -> rfid_uid -> colour
         try:
             by = {}
             for r in csv.DictReader(open(os.path.join(site_dir, site['ground_truth']))):
@@ -73,8 +95,9 @@ class Scene:
                     continue
                 rows.sort(key=lambda r: (not r['name'].startswith('Ref '), int(r['name'].split()[-1]) if r['name'].startswith('Item') and r['name'].split()[-1].isdigit() else 0, r['name']))
                 for j, r in enumerate(rows):
-                    light = 0.36 + 0.4 * (j / (len(rows) - 1) if len(rows) > 1 else 0.5)
-                    self.tag_color[r['epc'].strip().upper()] = tuple(int(255 * v) for v in colorsys.hls_to_rgb(self.shelves[sid]['hue'], light, 0.78))
+                    f = j / (len(rows) - 1) if len(rows) > 1 else 0.5
+                    for th, lo, span in (('dark', 0.36, 0.40), ('light', 0.28, 0.30)):      # darker shades on the light stage
+                        self.tag_color[th][r['epc'].strip().upper()] = tuple(int(255 * v) for v in colorsys.hls_to_rgb(self.shelves[sid]['hue'], lo + span * f, 0.78))
         except (OSError, KeyError, ValueError):
             pass
         allc = np.concatenate([s['corners'][:, :2] for s in self.shelves.values()])
@@ -88,10 +111,16 @@ class Scene:
 class SceneView:
     def __init__(self, scene):
         self.s, self.mode = scene, '2d'
-        self.f_small, self.f_label = _font(11), _font(12)
+        self.set_style('dark', 1.0)
         self.picks = ([], np.zeros((0, 2)))
         self.W, self.H, self.F = 640, 400, 0.5 * 400 / math.tan(math.radians(FOV / 2))      # replaced at every render
         self.reset()
+
+    def set_style(self, theme, scale):
+        """the window's theme ('dark' / 'light') and scale: colours, and the size of the text and the marks"""
+        self.theme, self.k = (theme if theme in THEMES else 'dark'), max(0.5, float(scale))
+        globals().update(THEMES[self.theme])
+        self.f_small, self.f_label = _font(int(round(11 * self.k))), _font(int(round(12 * self.k)))
 
     # ------------------------------------------------------------------ camera
     def reset(self):
@@ -158,11 +187,12 @@ class SceneView:
         if anchor == 'mb':
             x, y = x - w / 2, y - h - 4
         x, y = min(max(x, 2), self.W - w - 6), min(max(y, 2), self.H - h - 6)
-        d.rectangle([x - 3, y - 2, x + w + 3, y + h + 4], fill=(10, 13, 18, 205))
+        d.rectangle([x - 3, y - 2, x + w + 3, y + h + 4], fill=LABEL)
         d.text((x, y - b[1]), text, fill=fill, font=font)
 
     def render(self, W, H, data):
         s = self.s; self.W, self.H = W, H
+        k, th = self.k, self.theme; lw = max(1, int(round(k)))        # lw: a thin line at this scale
         if self.fit2:                        # 2D: the shelves with a margin, whatever size the picture has
             ext = (s.hi - s.lo) + 1.6; self.s2 = float(min(W / ext[0], H / ext[1])); self.c2 = (s.lo + s.hi) / 2
         self.b, self.F = self._basis(), 0.5 * H / math.tan(math.radians(FOV / 2))
@@ -176,27 +206,27 @@ class SceneView:
         if data.get('cloud', True) and len(s.cloud):            # point cloud over the grid: far points first, near ones win
             step = 3 if data.get('fast') else 1                 # while the mouse is dragging: a third of the points
             keep = np.flatnonzero(s.cloud[:, 2] > 0.10)[::step] if flat else slice(None, None, step)
-            sx, sy, z, _ = self.project(s.cloud[keep]); col = s.cloud_rgb[keep]
+            sx, sy, z, _ = self.project(s.cloud[keep]); col = s.cloud_rgb[th][keep]
             m = (z > NEAR) & (sx >= 0) & (sx < W - 1) & (sy >= 0) & (sy < H - 1)
             xi, yi, zz, col = sx[m].astype(int), sy[m].astype(int), z[m], col[m]
-            o = np.argsort(-zz); xi, yi, zz = xi[o], yi[o], zz[o]; col = (col[o] * 0.72).astype(np.uint8)
+            o = np.argsort(-zz); xi, yi, zz = xi[o], yi[o], zz[o]; col = col[o]
             a = np.array(im); a[yi, xi] = col
             big = np.ones(len(zz), bool) if flat else zz < 6.0  # near points are 2 x 2 pixels so the surfaces close up
             for ox, oy in ((1, 0), (0, 1), (1, 1)):
                 a[yi[big] + oy, xi[big] + ox] = col[big]
             im = Image.fromarray(a); d = ImageDraw.Draw(im, 'RGBA')
         for sid, sh in s.shelves.items():                       # shelf boxes
-            c, col = sh['corners'], sh['color']
+            c, col = sh['corners'], sh['color'][th]
             if flat:
                 self._poly(d, c[:4], fill=col + (30,), outline=col + (200,))
-                sx, sy, _, _ = self.project(c[:4].mean(0)); d.text((sx[0] - 8, sy[0] - 7), 'S%d' % sid, fill=col + (230,), font=self.f_label)
+                sx, sy, _, _ = self.project(c[:4].mean(0)); d.text((sx[0] - 8 * k, sy[0] - 7 * k), 'S%d' % sid, fill=col + (230,), font=self.f_label)
             else:
                 self._poly(d, c[:4], fill=col + (22,)); self._poly(d, c[[3, 2, 6, 7]], fill=col + (18,))
                 for i, j in EDGES:
                     self._line(d, c[i], c[j], col + (150,))
                 sx, sy, z, _ = self.project(c[4:].mean(0))
                 if z[0] > NEAR:
-                    d.text((sx[0] - 8, sy[0] - 16), 'S%d' % sid, fill=col + (230,), font=self.f_label)
+                    d.text((sx[0] - 8 * k, sy[0] - 16 * k), 'S%d' % sid, fill=col + (230,), font=self.f_label)
         path = data.get('path')
         if path is not None and len(path) > 1:                  # driven path on the floor
             sx, sy, z, _ = self.project(np.c_[np.asarray(path, float), np.full(len(path), 0.01)])
@@ -206,74 +236,80 @@ class SceneView:
                     run.append((x, y))
                 else:
                     if len(run) > 1:
-                        d.line(run, fill=PATH + (200,), width=2)
+                        d.line(run, fill=PATH + (200,), width=2 * lw)
                     run = []
             if len(run) > 1:
-                d.line(run, fill=PATH + (200,), width=2)
+                d.line(run, fill=PATH + (200,), width=2 * lw)
         ring = np.array([[math.cos(k * math.pi / 8), math.sin(k * math.pi / 8), 0.0] for k in range(16)])
         for x, y, name, st in data.get('waypoints') or ():
             col = {'ok': GREEN, 'goal': YELLOW, 'fail': RED}.get(st, GREY)
             self._poly(d, np.array([x, y, 0.01]) + 0.11 * ring, fill=col + (150,) if st in ('ok', 'fail', 'goal') else None, outline=col + (255,))
             if flat and name:
-                sx, sy, _, _ = self.project([x, y, 0]); d.text((sx[0] + 8, sy[0] - 16), name, fill=SUB, font=self.f_small)
+                sx, sy, _, _ = self.project([x, y, 0]); d.text((sx[0] + 8 * k, sy[0] - 16 * k), name, fill=SUB, font=self.f_small)
         rob = data.get('robot')
         if rob:                                                 # base, heading, mast, antenna panel and its boresight (robot's left)
             x, y, yaw, az, live = rob; col = ROBOT if live else GREY
             fw, lf = np.array([math.cos(yaw), math.sin(yaw), 0.0]), np.array([-math.sin(yaw), math.cos(yaw), 0.0]); base = np.array([x, y, 0.02])
-            self._poly(d, base + 0.17 * ring, fill=(43, 62, 82, 235), outline=col + (255,))
+            self._poly(d, base + 0.17 * ring, fill=BASE_FILL, outline=col + (255,))
             self._poly(d, [base + 0.30 * fw, base + 0.13 * fw + 0.09 * lf, base + 0.13 * fw - 0.09 * lf], fill=col + (255,))
             ant = np.array([x, y, 0.0]) + s.off[0] * fw + s.off[1] * lf; up = np.array([0.0, 0.0, 1.0])
-            self._line(d, ant + 0.2 * up, ant + 1.5 * up, (110, 126, 150, 255), 2)
+            self._line(d, ant + 0.2 * up, ant + 1.5 * up, MAST, 2 * lw)
             c = ant + az * up
             self._poly(d, [c + 0.15 * fw + 0.15 * up, c - 0.15 * fw + 0.15 * up, c - 0.15 * fw - 0.15 * up, c + 0.15 * fw - 0.15 * up], fill=col + (210,), outline=col + (255,))
-            self._line(d, c, c + 0.6 * lf, col + (230,), 2)
+            self._line(d, c, c + 0.6 * lf, col + (230,), 2 * lw)
         items = data.get('items') or []
         uids, xy = [], []
         if items:
             P = np.array([[i['x'], i['y'], i['z']] for i in items], float); sx, sy, z, ppm = self.project(P)
             sel, hov, truth = data.get('selected'), data.get('hover'), data.get('truth') and s.truth
-            for k in np.argsort(-z):
-                i = items[k]
-                if z[k] <= NEAR:
+            sels = set(sel) if isinstance(sel, (list, tuple, set, frozenset)) else ({sel} if sel else set())
+            for k_ in np.argsort(-z):
+                i = items[k_]
+                if z[k_] <= NEAR:
                     continue
-                x, y = float(sx[k]), float(sy[k])
+                x, y = float(sx[k_]), float(sy[k_])
                 # as on the replay page: the tag's own colour (its measured shelf's hue, its own shade); a tag the tape sheet
                 # does not know takes the colour of the shelf it was placed on
-                col = s.tag_color.get(i['uid']) or (s.shelves[i['shelf']]['color'] if i.get('shelf') in s.shelves else PATH)
-                mark = i['uid'] in (sel, hov)
-                if i.get('r90') and (mark or (data.get('regions') and i['state'] == 'new')):       # translucent, no hard edge
-                    r = i['r90'] * float(ppm[k]); d.ellipse([x - r, y - r, x + r, y + r], fill=col + (46 if mark else 20,), outline=col + (150,) if mark else None)
-                if truth and i['uid'] in s.truth and i['state'] == 'new':                           # diamond at the tape position, line to the estimate
+                col = s.tag_color[th].get(i['uid']) or (s.shelves[i['shelf']]['color'][th] if i.get('shelf') in s.shelves else PATH)
+                mark = i['uid'] in sels or i['uid'] == hov
+                dim = bool(i.get('dim')) and not mark              # it does not pass the window's filter: faint, nothing extra
+                if i.get('r90') and (mark or (data.get('regions') and i['state'] == 'new' and not dim)):       # translucent, no hard edge
+                    r = i['r90'] * float(ppm[k_]); d.ellipse([x - r, y - r, x + r, y + r], fill=col + (46 if mark else 20,), outline=col + (150,) if mark else None)
+                if truth and i['uid'] in s.truth and i['state'] == 'new' and not dim:               # diamond at the tape position, line to the estimate
                     tx, ty, tz, tp = self.project(s.truth[i['uid']])
                     if tz[0] > NEAR:
-                        tx, ty = float(tx[0]), float(ty[0]); h = min(max(0.036 * float(tp[0]), 4.0), 12.0); w = 0.72 * h
-                        d.line([(x, y), (tx, ty)], fill=col + (205,), width=1)
+                        tx, ty = float(tx[0]), float(ty[0]); h = min(max(0.036 * float(tp[0]), 4.0 * k), 12.0 * k); w = 0.72 * h
+                        d.line([(x, y), (tx, ty)], fill=col + (205,), width=lw)
                         d.polygon([(tx, ty - h), (tx + w, ty), (tx, ty + h), (tx - w, ty)], fill=col + (255,))       # flat, in the tag's colour
-                r = min(max(0.035 * float(ppm[k]), 3.0), 12.0) + (1 if mark else 0)                # a 3.5 cm ball, as on the page
-                if i['state'] == 'new':
+                r = min(max(0.035 * float(ppm[k_]), 3.0 * k), 12.0 * k) + (k if mark else 0)        # a 3.5 cm ball, as on the page
+                if dim:
+                    d.ellipse([x - r, y - r, x + r, y + r], fill=GREY + (70,) if i['state'] == 'new' else None, outline=GREY + (90,))
+                elif i['state'] == 'new':
                     d.ellipse([x - r, y - r, x + r, y + r], fill=col + (255,))
                 elif i['state'] == 'missing':
-                    d.ellipse([x - r, y - r, x + r, y + r], outline=RED + (255,), width=2)
-                    d.line([(x - 3, y - 3), (x + 3, y + 3)], fill=RED + (255,), width=2); d.line([(x - 3, y + 3), (x + 3, y - 3)], fill=RED + (255,), width=2)
+                    c3 = 3 * k
+                    d.ellipse([x - r, y - r, x + r, y + r], outline=RED + (255,), width=2 * lw)
+                    d.line([(x - c3, y - c3), (x + c3, y + c3)], fill=RED + (255,), width=2 * lw); d.line([(x - c3, y + c3), (x + c3, y - c3)], fill=RED + (255,), width=2 * lw)
                 else:
-                    d.ellipse([x - r, y - r, x + r, y + r], outline=GREY + (220,), width=1)
+                    d.ellipse([x - r, y - r, x + r, y + r], outline=GREY + (220,), width=lw)
                 if mark:
-                    d.ellipse([x - r - 4, y - r - 4, x + r + 4, y + r + 4], outline=(255, 255, 255, 230), width=2)
+                    d.ellipse([x - r - 4 * k, y - r - 4 * k, x + r + 4 * k, y + r + 4 * k], outline=RING, width=2 * lw)
                 uids.append(i['uid']); xy.append((x, y))
-            for uid in (hov, sel):                              # label on top of everything
-                k = next((k for k, i in enumerate(items) if i['uid'] == uid), None)
-                if k is not None and z[k] > NEAR:
-                    i = items[k]; self._label(d, float(sx[k]), float(sy[k]) - 8, '%s   %s' % (i['name'], i.get('note', '')), TEXT, self.f_label, 'mb')
+            for uid in [hov] + (list(sels) if len(sels) == 1 else []):       # label on top of everything (one item, not a whole group)
+                k_ = next((n for n, i in enumerate(items) if i['uid'] == uid), None)
+                if k_ is not None and z[k_] > NEAR:
+                    i = items[k_]; self._label(d, float(sx[k_]), float(sy[k_]) - 8 * k, '%s   %s' % (i['name'], i.get('note', '')), TEXT, self.f_label, 'mb')
         self.picks = (uids, np.array(xy, float).reshape(-1, 2))
-        y = 6
+        y = 6 * k
         for line in data.get('hud') or ():
-            self._label(d, 8, y, line, SUB); y += 19
+            self._label(d, 8 * k, y, line, SUB); y += 19 * k
         hint = 'drag: move · wheel: zoom · double-click: reset' if flat else 'drag: orbit · right-drag: move · wheel: zoom · double-click: reset'
-        d.text((8, H - 18), hint, fill=GREY + (255,), font=self.f_small)
+        d.text((8 * k, H - 18 * k), hint, fill=GREY + (255,), font=self.f_small)
         return im
 
     def pick(self, mx, my, radius=10):
-        """uid of the item nearest to the mouse, within radius pixels"""
+        """uid of the item nearest to the mouse, within radius pixels (at scale 1)"""
+        radius = radius * self.k
         uids, xy = self.picks
         if not len(uids):
             return None
@@ -285,4 +321,6 @@ if __name__ == '__main__':       # a still picture of the empty room, to see the
     import sys
     sc = Scene(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'loc', 'site')); v = SceneView(sc)
     v.mode = sys.argv[2] if len(sys.argv) > 2 else '3d'
+    if len(sys.argv) > 3:
+        v.set_style(sys.argv[3], float(sys.argv[4]) if len(sys.argv) > 4 else 1.0)       # light | dark, scale
     v.render(900, 600, {'hud': ['%d shelves, %d cloud points' % (len(sc.shelves), len(sc.cloud))]}).save(sys.argv[1])

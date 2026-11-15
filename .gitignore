@@ -6,3 +6,9 @@ master.db
 
 __pycache__/
 *.pyc
+
+# this PC's own settings, names, photos and backups
+orio_rfid/demo/demo.conf
+item_names.csv
+item_photos/
+*.before_*

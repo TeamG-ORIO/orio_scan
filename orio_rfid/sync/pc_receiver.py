@@ -21,13 +21,30 @@ Endpoints (JSON over plain HTTP, standard library only):
                          where each item is (from the item localiser, loc/live); stored in the item_locations table
                       -> {"ok": true, "stored": n}
     POST /engine      <- {"note": "...", "error": false, "source": "<host>"}   the item localiser's heartbeat, every round
-    GET  /state       -> everything the demo GUI shows: items with presence and location, the scan, stream counters,
-                         and when the localiser was last heard from
+    POST /scan        <- {"run": "...", "phase": "done", "complete": true, "run_started": <s>, "run_ended": <s>, "wp_ok": n, "wp_n": n}
+                         the robot's agent, once, when a run is over: closes the current scan. "complete" = the run drove
+                         its route to the end by itself (not stopped, not failed). Only a complete scan counts as missed.
+                      -> {"ok": true, "complete": true, "missed": <items it did not read>}
+    POST /par         <- {"item_name": "...", "par": 4}   the stock level wanted for that item name (null: not tracked)
+    POST /fresh       <- {}   forget what earlier runs found, so that the next run starts from nothing: the positions
+                         (item_locations) and the missed-scan counts are deleted, every item is set to not on shelf (as
+                         each new scan does anyway), and /state stops showing last-seen times and scans from before
+                         this moment. Kept: the item list itself, expiry dates, PAR, last_seen in the table (other
+                         tools use that column; it is only hidden), the scans table, and every run's files on disk.
+                      -> {"ok": true, "locations": <rows deleted>, "missed": <counts deleted>}
+    GET  /state       -> everything the demo GUI shows: items with presence, missed scans, PAR and location, the scan,
+                         stream counters, and when the localiser was last heard from
 
 A sighting moves last_seen forward (PC local time, the format the dashboard already reads) and, if it was
 read during the current scan, sets is_on_shelf = 1. Older or repeated sightings are harmless.
 When a newer scan_started arrives, every item is first set to is_on_shelf = 0 (a new scan began on the robot).
 Items go missing only that way: nothing times out.
+
+Missed scans: when the agent reports a COMPLETE scan as over, every item that scan did not read gets one more missed
+scan (item_status.missed_scans) and every item it read goes back to 0. A scan that was stopped or failed changes
+nothing for the items it did not reach. A sighting that arrives late, after the scan was closed, still clears its
+item. The scans themselves are kept in the scans table. All of this is in tables of its own: medical_supplies keeps
+the layout db_manager.py and inventory_dashboard.py use.
 
 item_locations is a separate table in the same file (one row per tag, the newest estimate); medical_supplies is not
 changed by it. A location stays when a new scan starts: for an item that is now missing it is where it was last.
@@ -57,6 +74,14 @@ LOC_SCHEMA = '''CREATE TABLE IF NOT EXISTS item_locations (
     updated TEXT,              -- PC local time, same format as last_seen
     updated_s REAL)            -- unix seconds
 '''
+SCAN_SCHEMA = '''CREATE TABLE IF NOT EXISTS scans (
+    scan_started REAL PRIMARY KEY,   -- robot clock, as in sync_state
+    run TEXT, ended REAL,            -- ended: PC clock; NULL while the scan is going (or was never reported as over)
+    complete INTEGER,                -- 1 = drove its route to the end; only these count as a missed scan
+    phase TEXT, wp_ok INTEGER, wp_n INTEGER, n_items INTEGER, n_seen INTEGER)'''
+STATUS_SCHEMA = 'CREATE TABLE IF NOT EXISTS item_status (rfid_uid TEXT PRIMARY KEY, missed_scans INTEGER DEFAULT 0)'
+PRODUCT_SCHEMA = 'CREATE TABLE IF NOT EXISTS products (item_name TEXT PRIMARY KEY, par INTEGER)'     # PAR per item name
+SCAN_COLS = ['scan_started', 'run', 'ended', 'complete', 'phase', 'wp_ok', 'wp_n', 'n_items', 'n_seen']
 LOC_COLS = ['rfid_uid', 'item_name', 'shelf', 'shelf_prob', 'x_m', 'y_m', 'z_m', 'region90_m', 'method', 'n_reads', 'run', 'updated', 'updated_s']
 WRITE_LOCK = threading.Lock()
 LIVE = {'robot': None, 'sightings_at': None, 'sightings_n': 0, 'unknown': set(),           # filled as posts arrive
@@ -70,6 +95,8 @@ def connect(path):
     conn.execute(SCHEMA)
     conn.execute(STATE_SCHEMA)
     conn.execute(LOC_SCHEMA)
+    for s in (SCAN_SCHEMA, STATUS_SCHEMA, PRODUCT_SCHEMA):
+        conn.execute(s)
     return conn
 
 
@@ -124,10 +151,11 @@ def store_locations(conn, data):
 def state(conn):
     items = []
     q = ('SELECT m.rfid_uid, m.item_name, m.expiration_date, m.last_seen, m.is_on_shelf, l.shelf, l.shelf_prob, l.x_m, l.y_m, l.z_m, '
-         'l.region90_m, l.method, l.n_reads, l.updated_s FROM medical_supplies m LEFT JOIN item_locations l ON l.rfid_uid = m.rfid_uid '
-         'ORDER BY m.item_name, m.rfid_uid')
+         'l.region90_m, l.method, l.n_reads, l.updated_s, COALESCE(s.missed_scans, 0), p.par FROM medical_supplies m '
+         'LEFT JOIN item_locations l ON l.rfid_uid = m.rfid_uid LEFT JOIN item_status s ON s.rfid_uid = m.rfid_uid '
+         'LEFT JOIN products p ON p.item_name = m.item_name ORDER BY m.item_name, m.rfid_uid')
     keys = ['rfid_uid', 'item_name', 'expiration_date', 'last_seen', 'is_on_shelf', 'shelf', 'shelf_prob', 'x_m', 'y_m', 'z_m',
-            'region90_m', 'method', 'n_reads', 'loc_updated_s']
+            'region90_m', 'method', 'n_reads', 'loc_updated_s', 'missed_scans', 'par']
     for r in conn.execute(q):
         items.append(dict(zip(keys, r)))
     # tags the localiser placed that are not in the inventory table (e.g. registry tags the master database does not list)
@@ -135,7 +163,24 @@ def state(conn):
         'SELECT %s FROM item_locations l WHERE NOT EXISTS (SELECT 1 FROM medical_supplies m WHERE m.rfid_uid = l.rfid_uid)' % ', '.join('l.' + c for c in LOC_COLS))]
     row = conn.execute("SELECT value FROM sync_state WHERE key = 'scan_started'").fetchone()
     live = dict(LIVE, unknown=sorted(LIVE['unknown']))
+    scan = conn.execute('SELECT %s FROM scans WHERE scan_started = ?' % ', '.join(SCAN_COLS), (row[0],)).fetchone() if row else None
+    # a fresh start (POST /fresh): nothing from before it is shown. ended and fresh_since are both this PC's clock.
+    fr = conn.execute("SELECT value FROM sync_state WHERE key = 'fresh_since'").fetchone()
+    fresh = fr[0] if fr else 0.0
+    if fresh:
+        stamp = time.strftime(TIME_FMT, time.localtime(fresh))
+        for i in items:
+            if i['last_seen'] and i['last_seen'] < stamp:       # same fixed-width format, so string order = time order
+                i['last_seen'] = None
+        if scan is not None and scan[2] is not None and scan[2] <= fresh:       # the scan that was current then is over and from before
+            scan = None
     return {'ok': True, 'now': time.time(), 'scan_started': row[0] if row else None, 'items': items, 'located_other': other,
+            # the PAR of every name that has one: the window names the tags from its names file, not from item_name
+            'pars': dict(conn.execute('SELECT item_name, par FROM products WHERE par IS NOT NULL')),
+            # the current scan (ended = None while it is going) and how many complete scans there have been
+            'scan': dict(zip(SCAN_COLS, scan)) if scan else None,
+            'scans_done': conn.execute('SELECT COUNT(*) FROM scans WHERE complete = 1 AND ended > ?', (fresh,)).fetchone()[0],
+            'fresh_since': fresh or None, 'cleared': bool(fresh) and scan is None,       # cleared: a fresh start, and no scan since
             'n_items': len(items), 'n_on_shelf': sum(1 for i in items if i['is_on_shelf']),
             'n_located': sum(1 for i in items if i['is_on_shelf'] and i['x_m'] is not None), 'live': live}
 
@@ -145,7 +190,10 @@ def apply_sightings(conn, sightings, scan_started=None):
     current = row[0] if row else 0.0
     reset = False
     if scan_started is not None and float(scan_started) > current:   # the robot launched a new scan
+        # a scan that was never reported as over (agent gone, PC off at the time) is closed as not complete
+        conn.execute("UPDATE scans SET ended = ?, complete = 0, phase = 'never reported as over' WHERE ended IS NULL", (time.time(),))
         current = float(scan_started)
+        conn.execute('INSERT OR IGNORE INTO scans (scan_started) VALUES (?)', (current,))
         conn.execute('UPDATE medical_supplies SET is_on_shelf = 0')
         conn.execute("INSERT OR REPLACE INTO sync_state (key, value) VALUES ('scan_started', ?)", (current,))
         reset = True
@@ -164,10 +212,61 @@ def apply_sightings(conn, sightings, scan_started=None):
             changed = True
         if seen_at >= current and row[1] != 1:   # reads from before this scan do not count as present
             conn.execute('UPDATE medical_supplies SET is_on_shelf = 1 WHERE rfid_uid = ?', (uid,))
+            conn.execute('INSERT OR REPLACE INTO item_status (rfid_uid, missed_scans) VALUES (?, 0)', (uid,))   # it is back
             changed = True
         updated += changed
     conn.commit()
     return updated, unknown, reset
+
+
+def close_scan(conn, data):
+    """the agent says its run is over: close the current scan and, if it was complete, count it for the items it did not read"""
+    row = conn.execute("SELECT value FROM sync_state WHERE key = 'scan_started'").fetchone()
+    if row is None:
+        return {'ok': False, 'error': 'no scan has started'}
+    current = row[0]
+    # both times are the robot's clock: the scan must have started inside the run that is being reported
+    t0, t1 = data.get('run_started'), data.get('run_ended')
+    if t0 is not None and t1 is not None and not float(t0) - 5.0 <= current <= float(t1) + 5.0:
+        return {'ok': False, 'error': 'the current scan was not started by this run'}
+    conn.execute('INSERT OR IGNORE INTO scans (scan_started) VALUES (?)', (current,))
+    if conn.execute('SELECT ended FROM scans WHERE scan_started = ?', (current,)).fetchone()[0] is not None:
+        return {'ok': True, 'already': True}
+    complete = bool(data.get('complete'))
+    n_items, n_seen = conn.execute('SELECT COUNT(*), COALESCE(SUM(is_on_shelf = 1), 0) FROM medical_supplies').fetchone()
+    if complete:
+        conn.execute('INSERT OR IGNORE INTO item_status (rfid_uid, missed_scans) SELECT rfid_uid, 0 FROM medical_supplies')
+        conn.execute('UPDATE item_status SET missed_scans = missed_scans + 1 WHERE rfid_uid IN '
+                     '(SELECT rfid_uid FROM medical_supplies WHERE COALESCE(is_on_shelf, 0) != 1)')
+        conn.execute('UPDATE item_status SET missed_scans = 0 WHERE rfid_uid IN (SELECT rfid_uid FROM medical_supplies WHERE is_on_shelf = 1)')
+    conn.execute('UPDATE scans SET run = ?, ended = ?, complete = ?, phase = ?, wp_ok = ?, wp_n = ?, n_items = ?, n_seen = ? WHERE scan_started = ?',
+                 (data.get('run'), time.time(), int(complete), str(data.get('phase') or '')[:40], data.get('wp_ok'), data.get('wp_n'), n_items, n_seen, current))
+    conn.commit()
+    return {'ok': True, 'complete': complete, 'missed': n_items - n_seen}
+
+
+def fresh_start(conn):
+    """POST /fresh: see the top of the file"""
+    now = time.time()
+    n_loc = conn.execute('DELETE FROM item_locations').rowcount
+    n_missed = conn.execute('DELETE FROM item_status').rowcount
+    conn.execute('UPDATE medical_supplies SET is_on_shelf = 0')
+    conn.execute("UPDATE scans SET ended = ?, complete = 0, phase = 'cleared by a fresh start' WHERE ended IS NULL", (now,))
+    conn.execute("INSERT OR REPLACE INTO sync_state (key, value) VALUES ('fresh_since', ?)", (now,))
+    conn.commit()
+    return {'ok': True, 'locations': n_loc, 'missed': n_missed}
+
+
+def set_par(conn, data):
+    name, par = str(data['item_name']), data.get('par')
+    if par in (None, ''):
+        conn.execute('DELETE FROM products WHERE item_name = ?', (name,))
+    else:
+        if int(par) < 0:
+            raise ValueError('PAR cannot be negative')
+        conn.execute('INSERT OR REPLACE INTO products (item_name, par) VALUES (?, ?)', (name, int(par)))
+    conn.commit()
+    return {'ok': True, 'item_name': name, 'par': None if par in (None, '') else int(par)}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -199,7 +298,7 @@ class Handler(BaseHTTPRequestHandler):
             conn.close()
 
     def do_POST(self):
-        if self.path not in ('/sightings', '/reads', '/locations', '/engine'):
+        if self.path not in ('/sightings', '/reads', '/locations', '/engine', '/scan', '/par', '/fresh'):
             return self.reply(404, {'ok': False, 'error': 'unknown path'})
         try:
             data = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))))
@@ -210,6 +309,18 @@ class Handler(BaseHTTPRequestHandler):
                 with WRITE_LOCK:
                     ok, have = store_reads(self.runs_dir, data)
                 return self.reply(200, {'ok': ok, 'have': have})
+            if self.path in ('/scan', '/par', '/fresh'):
+                conn = connect(self.db_path)
+                try:
+                    with WRITE_LOCK:
+                        out = close_scan(conn, data) if self.path == '/scan' else fresh_start(conn) if self.path == '/fresh' else set_par(conn, data)
+                finally:
+                    conn.close()
+                if self.path == '/fresh':
+                    print('%s  fresh start: %s' % (time.strftime('%H:%M:%S'), out), flush=True)
+                if self.path == '/scan':
+                    print('%s  scan over (%s, %s): %s' % (time.strftime('%H:%M:%S'), data.get('run'), data.get('phase'), out), flush=True)
+                return self.reply(200, out)
             if self.path == '/locations':
                 conn = connect(self.db_path)
                 try:

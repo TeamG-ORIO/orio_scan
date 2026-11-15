@@ -1,0 +1,64 @@
+# demo.conf.example - copy to demo.conf (not in git: it holds this site's addresses) and fill in ROBOT_HOST and PC_HOST.
+# demo.conf: one place for the addresses and the site of the scan demo. KEY=VALUE, no spaces around "=".
+# Read by run_scan_demo.sh (bash) and scan_dashboard.py (Python). Lines starting with # are ignored.
+
+# --- the two machines -------------------------------------------------------------------------------------
+# Today (trial on abuela): Tailscale addresses. On the team router (TeamG_ORIO_5G, no internet) change these
+# two to the 192.168.50.x addresses the router gives the machines.
+ROBOT_HOST=ROBOT_ADDRESS
+ROBOT_USER=hello-robot
+PC_HOST=PC_ADDRESS
+# the address of this PC as the ROBOT reaches it (the robot posts its reads there)
+
+ROBOT_REPO=~/orio-main
+AGENT_PORT=8123
+RECEIVER_PORT=8000
+# python on the PC for the receiver and the localiser: with ENGINE=pc it needs torch, numpy, pandas, scipy
+PYTHON=python3
+# python for the window, if it must differ: it needs tkinter with Xft, numpy and Pillow. Left out: PYTHON if its Tk is
+# good, else the system's /usr/bin/python3 (a conda python often has a Tk that only draws rough bitmap fonts).
+#GUI_PYTHON=/usr/bin/python3
+# the window's text font, if you want a particular one that is installed (default: the first it finds of Inter, Roboto,
+# Noto Sans, Open Sans, Source Sans, IBM Plex Sans, Lato, Liberation Sans, Arial, Ubuntu, DejaVu Sans)
+#FONT=Liberation Sans
+
+# --- inventory on the PC ----------------------------------------------------------------------------------
+# SQLite file with the medical_supplies table. If it does not exist, a test copy is built with every item tag
+# in RFID/tag_registry.csv. Point this at the real master database on demo day. The window shows the tags that
+# have an item number in the registry, and no others.
+DB=~/orio_scan/master.db
+
+# item names: one CSV file on the PC, item number -> name (see README.md, "Item numbers and names"). The team adds
+# to it; the window reads it again when it is saved. Default: item_names.csv next to DB.
+#NAMES=~/orio_scan/item_names.csv
+
+# item photos: a folder on the PC, files named after the item or the tag id (see README.md, "Item photos").
+# Default: item_photos next to DB. Days before its date from which an item counts as "expiring": default 30.
+#PHOTOS=~/orio_scan/item_photos
+#EXPIRY_SOON_DAYS=30
+
+# --- item localiser ---------------------------------------------------------------------------------------
+# ENGINE: pc = the robot sends its reads, this PC computes; robot = the robot computes and sends results; off
+# METHOD: one of F1 F2 F3 F4 (F4 = shelf boxes + other items, the most accurate on run 2)
+ENGINE=pc
+METHOD=F4
+# CELLS: all = the whole room grid, exactly as the offline method (default; needs the GPU).
+#        shelf = only the cells in or near the shelf boxes, for F3 / F4: several times quicker (see loc/README.md, "Delay").
+#        On run 2 it gives F4 the same position for all 132 items to the millimetre, and F3 for 131 of 132.
+CELLS=all
+
+# --- site (paths on the ROBOT) ----------------------------------------------------------------------------
+# Since 14 Nov the corridor is driven on the "cap" map: ORB-SLAM3 only uses features from the floor up to 1.143 m, so
+# people standing behind the 1.14 m walls do not disturb it. FEATURE_BAND ("LOW HIGH" in metres; -1 = from under the
+# floor) and a map built with it (..._cap) belong together: use both or neither. Without FEATURE_BAND the old set is
+# MAP=hospital_corridor_v2 and RUN_DIR=~/orio/datasets/hospital_corridor_v2/orbslam/ir-rgbd_map.
+MAP=hospital_corridor_v2_cap
+RUN_DIR=~/orio/datasets/hospital_corridor_v2/orbslam/ir-rgbd_map_clean_140_cap
+WAYPOINTS=~/orio/config/waypoints_hospital_corridor_v2.yaml
+FEATURE_BAND=-1 1.143
+# speed of the lift's up-and-down wave during a run, m/s (0.02 to 0.15). The agent turns it into the wave's period for
+# the run script's range (0.17 to 1.05 m: one up-and-down in 17.6 s). At 0.15 m/s with the payload the lift's contact
+# stop ended the wave on 14 Nov; 0.08 was the speed of all runs before. Left out: the run script's own period.
+LIFT_SPEED=0.10
+LAPS=2
+START_AT=1

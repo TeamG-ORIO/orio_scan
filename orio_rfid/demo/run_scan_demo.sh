@@ -30,7 +30,7 @@ while [ $# -gt 0 ]; do
 done
 say() { echo "[scan demo] $*"; }
 die() { echo "[scan demo] ERROR: $*" >&2; exit 1; }
-[ -f "$CONF" ] || die "no conf file: $CONF"
+[ -f "$CONF" ] || die "no conf file: $CONF (copy demo.conf.example to demo.conf and fill in the two addresses)"
 while IFS='=' read -r k v; do
   case "$k" in ''|\#*) continue;; esac
   printf -v "$k" '%s' "$v"
@@ -76,12 +76,33 @@ if $STOP; then
   exit 0
 fi
 
-"$PYTHON" -c 'import tkinter' 2>/dev/null || { $GUI && die "$PYTHON has no tkinter (sudo apt install python3-tk), or set PYTHON in $CONF"; }
+# The window needs a Python whose Tk draws text with Xft (smooth fonts, every installed font). Some conda Pythons have a Tk
+# without it: bitmap fonts only, symbols missing. So the window gets its own Python: GUI_PYTHON from the conf file if set,
+# else PYTHON if its Tk is good, else the system's python3. The receiver and the localiser stay on PYTHON.
+gui_ok() { "$1" - >/dev/null 2>&1 <<'PYEOF'
+import sys, tkinter, numpy, PIL.ImageTk
+r = tkinter.Tk(); r.withdraw()
+sys.exit(0 if str(r.tk.call('::tk::pkgconfig', 'get', 'fontsystem')) == 'xft' else 1)
+PYEOF
+}
+if $GUI; then
+  GUI_PY=""
+  for cand in "${GUI_PYTHON:-}" "$PYTHON" /usr/bin/python3 python3; do
+    [ -n "$cand" ] && gui_ok "$cand" && { GUI_PY="$cand"; break; }
+  done
+  if [ -z "$GUI_PY" ]; then
+    GUI_PY="${GUI_PYTHON:-$PYTHON}"
+    "$GUI_PY" -c 'import tkinter' 2>/dev/null || die "$GUI_PY has no tkinter (sudo apt install python3-tk), or set GUI_PYTHON in $CONF"
+    say "WARNING: no Python here has a Tk with Xft plus numpy and Pillow: the window will show rough fonts ($GUI_PY). sudo apt install python3-tk python3-pil.imagetk python3-numpy"
+  elif [ "$GUI_PY" != "$PYTHON" ]; then
+    say "the window runs on $GUI_PY ($PYTHON has a Tk without smooth fonts, or lacks numpy / Pillow)"
+  fi
+fi
 
 # ---- 1. receiver --------------------------------------------------------------------------------------------
 if [ ! -f "$DB" ]; then
-  say "no database at $DB: building a test one (seed inventory + the item tags of RFID/tag_registry.csv)"
-  "$PYTHON" "$PKG/sync/make_dummy_db.py" "$DB" --registry "$PKG/RFID/tag_registry.csv" || die "could not build $DB"
+  say "no database at $DB: building a test one (the item tags of RFID/tag_registry.csv)"
+  "$PYTHON" "$PKG/sync/make_dummy_db.py" "$DB" --no-seed --registry "$PKG/RFID/tag_registry.csv" || die "could not build $DB"
 fi
 if curl -s -m 2 "$RECV/health" | grep -q '"ok": true'; then
   say "receiver already running on port $RECEIVER_PORT (left as it is)"
@@ -134,7 +155,7 @@ fi
 
 # ---- 4. the window ------------------------------------------------------------------------------------------
 if $GUI; then
-  ORIO_DEMO_TOKEN="$TOKEN" "$PYTHON" "$HERE/scan_dashboard.py" --conf "$CONF" --agent "$AGENT" --receiver "$RECV"
+  ORIO_DEMO_TOKEN="$TOKEN" "$GUI_PY" "$HERE/scan_dashboard.py" --conf "$CONF" --agent "$AGENT" --receiver "$RECV"
 else
   say "running without the window. Ctrl-C stops the receiver and the localiser."
   trap 'exit 0' INT; while true; do sleep 1; done

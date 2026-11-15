@@ -1,0 +1,51 @@
+# item_names.csv - the names the scan demo window shows, by item number (the N of "Item N" in RFID/tag_registry.csv).
+# One line: the item numbers, a comma, the name, and if wanted a comma and the expiry date (2027-11-24).
+# Numbers: one (30), a range (30-35), or several with spaces (30 31 40-42). A name with a comma in it goes in "double quotes".
+# No date on a line: the item keeps the expiry date the database has for it. A number given twice: the later line wins.
+# The window reads this file again a few seconds after it is saved; no restart.
+item_no,name,expires
+141 148-149,0.9% Sodium Chloride Injection 10 mL - 5 pack
+18-19 28-35 40 59 146-147 203,3M Ranger,2028-05-20
+73-75,3M Ranger,2028-07-07
+80-82,5% Dextrose Injection - 50 mL
+119,ABC 5mm Handswitching Probe,2029-12-12
+41,Adhesive Remover Wipes - 75 count,2099-12-31
+39,Adult Pulse Oximeter Adhesive Sensor,2099-12-12
+250-266,Adult Pulse Oximeter Adhesive Sensor
+150,Alcohol Prep L x200,2099-12-31
+120,Anesthesiology Peel,2099-12-31
+83-96 100-101 104-111 134-135,Aquafina Water Bottle (355 mL),2099-02-26
+128,Asahi Peripheral Guide Wire
+47 60-61 124-125 129-132 138-139 204-226,Biogel Latex Gloves,2028-05-28
+197,Cardinal Health Adhesive Remover Wipes,2099-12-31
+62-65 68-69 76-79 126,Disposable Skin Stapler - 6 count,2030-09-07
+191-193,Entrust Ostomy Care Box,2027-12-31
+194,Entrust Ostomy Care Box
+70-72,Furniture Tipping Restraint,2099-12-31
+21 24 26,Gastric-jejunal Feeding Tube Kit,2027-11-24
+57,GelPOINT,2028-01-03
+198,Inspire Nitrile Gloves,2028-05-01
+273-281,Interlink System - Secondary Medication Set,2099-12-31
+97-99 102 153,Light Support Guidewire,2099-12-31
+58,NitriPride Vinyl Exam Gloves,2099-12-31
+112-113,Pepsi Bottle,2099-02-12
+53-54,Peripheral Dilation Catheter,2026-04-30
+1-13 154-186,PI Surgical Gloves,2027-12-31
+25 27 37,Pressure Injectable Arrowg+ard Blue Plus Four-Lumen CVC Kit,2026-10-31
+114 117 136 151,Pump Infusion Set,2027-12-02
+133 144,Pump Infusion Set,2026-12-07
+282-286,Pump Infusion Set
+103,Rosen Curved Wire Guide,2030-09-16
+201,RX Herkulink Elite Stent System,2026-02-01
+42-45 115-116 118 123 137 142-143 145 152 227-249,Safety Infusion Set - 5 ml/sec; 300 psi,2026-01-18
+121-122 140,SorbaView SHIELD Oval,2024-07-01
+267-272,SorbaView SHIELD Oval
+199,Stirling Nitrile Xtra Gloves,2029-03-30
+46 51,Supera Peripheral Stent System,2025-11-30
+14 16-17 20 23 36 38 48-50 187-190,Surgical Gown XL (Blue),2028-08-24
+200,Technomed Medical Accessories,2029-02-01
+15 55-56 127,Urine Meter Foley Tray 400mL,2026-09-06
+66-67,Viatorr Tips Endoprosthesis,2026-04-14
+195-196,Webcol Alcohol Prep,2099-12-31
+22 52,XIENCE Skypoint Everolimus-Eluting Coronary Stent,2026-01-16
+202,XIENCE Skypoint Everolimus-Eluting Coronary Stent
